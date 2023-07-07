@@ -3,6 +3,8 @@ use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::Instant;
+use clap::Parser;
+
 
 const PHONE_TITLES: [&str; 33] = [
     "139", "138", "137", "136", "135", "134", "159", "158", "157", "150", "151", "152", "188",
@@ -17,8 +19,8 @@ fn get_random_phone() -> String {
     return phone;
 }
 
-fn consumer(rx: Receiver<Vec<String>>) {
-    let mut conn = Connection::open("output.db").unwrap();
+fn consumer(rx: Receiver<Vec<String>>, dbpath: String) {
+    let mut conn = Connection::open(dbpath).unwrap();
     conn.execute_batch(
         "PRAGMA journal_mode = OFF;
               PRAGMA synchronous = 0;
@@ -57,20 +59,40 @@ fn producer(tx: Sender<Vec<String>>, count: i64) {
     tx.send(values).unwrap();
 }
 
+/// 随机生成手机号并写入SQLite
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// 输出文件路径(SQLite文件), example: --out ./output.db
+    #[arg(short, long, default_value_t = String::from("output.db"))]
+    out: String,
+
+    /// 生成手机号的数量, example: --num 1000000
+    #[arg(short, long, default_value_t = 1000)]
+    num: usize,
+}
+
+
 fn main() {
+    let args = Args::parse();
     let start = Instant::now();
     let (tx, rx): (Sender<Vec<String>>, Receiver<Vec<String>>) = mpsc::channel();
-    let consumer_handle = thread::spawn(|| consumer(rx));
+    let consumer_handle = thread::spawn(|| consumer(rx, args.out));
     let cpu_count = num_cpus::get();
-    let total_rows: usize = 100_000_000;
-    let each_producer_count: i64 = (total_rows / cpu_count) as i64;
+    let remaining = (args.num % cpu_count) as i64;
+    let each_producer_count = (args.num / cpu_count) as i64;
+    
     let mut handles: Vec<_> = Vec::with_capacity(cpu_count);
-    for _ in 0..cpu_count {
+    for i in 0..cpu_count {
         let thread_tx = tx.clone();
-        handles.push(thread::spawn(move || producer(thread_tx, each_producer_count)))
+        if i == 0 {
+            handles.push(thread::spawn(move || producer(thread_tx, each_producer_count + remaining)))
+        } else {
+            handles.push(thread::spawn(move || producer(thread_tx, each_producer_count)))
+        }
     }
-    for t in handles {
-        t.join().unwrap();
+    for handler in handles {
+        handler.join().unwrap();
     }
     drop(tx);
     // wait till consumer is exited
